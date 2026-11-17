@@ -1,0 +1,1389 @@
+
+/*
+===============================================================================
+NIGHTTIME THERMAL ANALYSIS OF PUNE DISTRICT
+Study Period : 2012–2023
+Season       : March–May (Pre-monsoon)
+
+PART A: ERA5-LAND NIGHTTIME 2 m AIR TEMPERATURE
+Sampling     : 03:30, 04:30, 05:30 IST
+
+PART B: MODIS TERRA NIGHTTIME LAND SURFACE TEMPERATURE
+Dataset      : MODIS/061/MOD11A1
+Bands        : LST_Night_1km, QC_Night
+
+OUTPUTS:
+Figure 3  : Annual ERA5 nighttime air temperature trend
+Figure 6  : Monthly ERA5 nighttime temperature statistics (CSV)
+Figure 7  : Annual MODIS nighttime land surface temperature trend
+
+EXPORTS:
+ERA5 annual statistics CSV
+ERA5 observation counts CSV
+ERA5 monthly statistics CSV
+ERA5 long-term mean GeoTIFF
+ERA5 spatial trend GeoTIFF
+MODIS annual statistics CSV
+MODIS long-term mean GeoTIFF
+
+IMPORTANT:
+ERA5 air temperature and MODIS land surface temperature are
+different physical variables and are analysed independently.
+===============================================================================
+*/
+
+
+// ============================================================================
+// 1. STUDY AREA
+// ============================================================================
+
+var pune = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM0_NAME', 'India'))
+  .filter(ee.Filter.eq('ADM1_NAME', 'Maharashtra'))
+  .filter(ee.Filter.eq('ADM2_NAME', 'Pune'));
+
+var puneGeometry = pune.geometry();
+
+Map.centerObject(pune, 8);
+
+Map.addLayer(
+  pune.style({
+    color: 'FFFFFF',
+    fillColor: '00000000',
+    width: 2
+  }),
+  {},
+  'Pune District Boundary'
+);
+
+print('STUDY AREA:', pune);
+print('Pune boundary feature count:', pune.size());
+
+
+// ============================================================================
+// 2. STUDY PERIOD
+// ============================================================================
+
+var years = ee.List.sequence(2012, 2023);
+var months = ee.List([3, 4, 5]);
+
+var START_YEAR = 2012;
+var END_YEAR = 2023;
+
+
+// ============================================================================
+// PART A: ERA5-LAND NIGHTTIME AIR TEMPERATURE
+// ============================================================================
+
+
+// ============================================================================
+// 3. LOAD ERA5-LAND HOURLY DATA
+// ============================================================================
+
+var era5Hourly = ee.ImageCollection('ECMWF/ERA5_LAND/HOURLY')
+  .select('temperature_2m');
+
+var firstEra5Image = ee.Image(era5Hourly.first());
+
+var era5Projection = firstEra5Image
+  .select('temperature_2m')
+  .projection();
+
+var era5Scale = era5Projection.nominalScale();
+
+print('ERA5 band names:', firstEra5Image.bandNames());
+print('ERA5 native projection:', era5Projection);
+print('ERA5 nominal scale (m):', era5Scale);
+
+
+// ============================================================================
+// 4. SELECT NIGHTTIME ERA5 OBSERVATIONS
+// ============================================================================
+
+// India Standard Time = UTC + 5 hours 30 minutes.
+//
+// 22:00 UTC = 03:30 IST next day.
+// 23:00 UTC = 04:30 IST next day.
+// 00:00 UTC = 05:30 IST same day.
+//
+// March–May has 92 days.
+// Expected observations = 92 × 3 = 276.
+
+function getNighttimeCollection(year) {
+
+  year = ee.Number(year);
+
+  var localStart = ee.Date.fromYMD(year, 3, 1);
+  var localEnd = ee.Date.fromYMD(year, 6, 1);
+
+  var utcStart = localStart.advance(-330, 'minute');
+  var utcEnd = localEnd.advance(-330, 'minute');
+
+  return era5Hourly
+    .filterDate(utcStart, utcEnd)
+    .filter(
+      ee.Filter.or(
+        ee.Filter.calendarRange(22, 23, 'hour'),
+        ee.Filter.calendarRange(0, 0, 'hour')
+      )
+    );
+}
+
+
+// ============================================================================
+// 5. CREATE ANNUAL ERA5 COMPOSITES
+// ============================================================================
+
+function createAnnualComposite(year) {
+
+  year = ee.Number(year);
+
+  var collection = getNighttimeCollection(year);
+
+  var annualTemperature = collection
+    .mean()
+    .subtract(273.15)
+    .rename('temperature_C')
+    .setDefaultProjection(era5Projection)
+    .clip(puneGeometry);
+
+  return annualTemperature.set({
+    Year: year,
+    Observation_Count: collection.size(),
+    Season: 'March-May',
+    Time_Window_IST: '03:30, 04:30, 05:30',
+    Dataset: 'ERA5-Land HOURLY'
+  });
+}
+
+var annualImages = ee.ImageCollection.fromImages(
+  years.map(createAnnualComposite)
+);
+
+print('ERA5 annual composites:', annualImages);
+print('ERA5 annual composite count:', annualImages.size());
+
+
+// ============================================================================
+// 6. ERA5 OBSERVATION COUNTS
+// ============================================================================
+
+var observationCountTable = ee.FeatureCollection(
+  years.map(function(year) {
+
+    year = ee.Number(year);
+
+    var collection = getNighttimeCollection(year);
+
+    return ee.Feature(null, {
+      Year: year,
+      Observation_Count: collection.size(),
+      Expected_Count: 276,
+      Season: 'March-May',
+      Dataset: 'ERA5-Land HOURLY'
+    });
+
+  })
+).sort('Year');
+
+print('ERA5 observation counts:', observationCountTable);
+
+
+// ============================================================================
+// 7. ERA5 LONG-TERM MEAN
+// ============================================================================
+
+var overallMeanTemperature = annualImages
+  .select('temperature_C')
+  .mean()
+  .setDefaultProjection(era5Projection)
+  .clip(puneGeometry);
+
+Map.addLayer(
+  overallMeanTemperature,
+  {
+    min: 15,
+    max: 30,
+    palette: [
+      '313695',
+      '74ADD1',
+      'FFFFBF',
+      'FDAE61',
+      'D73027'
+    ]
+  },
+  'ERA5 Mean Nighttime Air Temperature 2012–2023'
+);
+
+print('ERA5 long-term mean image:', overallMeanTemperature);
+
+
+// ============================================================================
+// 8. ERA5 ANNUAL DISTRICT-LEVEL STATISTICS
+// ============================================================================
+
+var annualStatistics = ee.FeatureCollection(
+  years.map(function(year) {
+
+    year = ee.Number(year);
+
+    var image = ee.Image(
+      annualImages
+        .filter(ee.Filter.eq('Year', year))
+        .first()
+    );
+
+    var stats = image.reduceRegion({
+
+      reducer: ee.Reducer.mean()
+        .combine({
+          reducer2: ee.Reducer.min(),
+          sharedInputs: true
+        })
+        .combine({
+          reducer2: ee.Reducer.max(),
+          sharedInputs: true
+        }),
+
+      geometry: puneGeometry,
+      crs: era5Projection,
+      scale: era5Scale,
+      maxPixels: 1e13,
+      tileScale: 4
+
+    });
+
+    return ee.Feature(null, {
+
+      Year: year,
+
+      Observation_Count: image.get('Observation_Count'),
+
+      Mean_Temperature_C:
+        stats.get('temperature_C_mean'),
+
+      Minimum_Spatial_Temperature_C:
+        stats.get('temperature_C_min'),
+
+      Maximum_Spatial_Temperature_C:
+        stats.get('temperature_C_max'),
+
+      Season: 'March-May',
+      Dataset: 'ERA5-Land HOURLY'
+
+    });
+
+  })
+).sort('Year');
+
+print('ERA5 annual statistics:', annualStatistics);
+
+print(
+  'ERA5 first annual statistics record:',
+  annualStatistics.first().toDictionary()
+);
+
+
+// ============================================================================
+// 9. ERA5 SPATIAL TEMPERATURE TREND
+// ============================================================================
+
+// Linear regression across annual composite images.
+// The scale band represents fitted temperature change per year.
+
+var annualImagesWithYear = annualImages.map(function(image) {
+
+  image = ee.Image(image);
+
+  var yearBand = ee.Image.constant(
+    ee.Number(image.get('Year'))
+  )
+    .rename('year')
+    .toFloat()
+    .setDefaultProjection(era5Projection);
+
+  return yearBand.addBands(
+    image.select('temperature_C')
+  );
+
+});
+
+var trendImage = annualImagesWithYear
+  .select(['year', 'temperature_C'])
+  .reduce(ee.Reducer.linearFit());
+
+var temperatureTrend = trendImage
+  .select('scale')
+  .rename('temperature_trend_C_per_year')
+  .setDefaultProjection(era5Projection)
+  .clip(puneGeometry);
+
+Map.addLayer(
+  temperatureTrend,
+  {
+    min: -0.15,
+    max: 0.15,
+    palette: [
+      '313695',
+      '74ADD1',
+      'FFFFBF',
+      'FDAE61',
+      'D73027'
+    ]
+  },
+  'ERA5 Nighttime Temperature Trend °C/year'
+);
+
+print('ERA5 spatial temperature trend:', temperatureTrend);
+
+
+// ============================================================================
+// 10. FIGURE 3: ERA5 ANNUAL TEMPERATURE TREND
+// ============================================================================
+
+var annualStatisticsForChart = annualStatistics.map(
+  function(feature) {
+
+    return feature.set(
+      'Year_numeric',
+      ee.Number(feature.get('Year'))
+    );
+
+  }
+);
+
+var annualTemperatureChart = ui.Chart.feature.byFeature({
+
+  features: annualStatisticsForChart,
+
+  xProperty: 'Year_numeric',
+
+  yProperties: ['Mean_Temperature_C']
+
+})
+.setChartType('LineChart')
+.setOptions({
+
+  title:
+    'Annual Mean Nighttime Air Temperature in Pune District (2012–2023)',
+
+  hAxis: {
+    title: 'Year',
+    format: '####',
+    gridlines: {count: 12}
+  },
+
+  vAxis: {
+    title: 'Mean Nighttime Air Temperature (°C)'
+  },
+
+  series: {
+    0: {
+      color: '#1769AA',
+      lineWidth: 3,
+      pointSize: 7
+    }
+  },
+
+  trendlines: {
+    0: {
+      type: 'linear',
+      color: '#D73027',
+      lineWidth: 2,
+      opacity: 0.9,
+      showR2: true,
+      visibleInLegend: true
+    }
+  },
+
+  legend: {position: 'bottom'},
+  chartArea: {width: '78%', height: '68%'},
+  width: 950,
+  height: 550
+
+});
+
+print('FIGURE 3: Annual ERA5 Temperature Trend', annualTemperatureChart);
+
+
+// ============================================================================
+// 11. FIGURE 6: MONTHLY ERA5 NIGHTTIME STATISTICS
+// ============================================================================
+
+// 12 years × 3 months = 36 monthly records.
+//
+// The UTC filter includes the preceding UTC calendar date
+// because the 03:30 IST observation occurs at 22:00 UTC
+// on the previous UTC date.
+
+var monthNames = ee.Dictionary({
+  '3': 'March',
+  '4': 'April',
+  '5': 'May'
+});
+
+var era5MonthlySource = era5Hourly
+  .filterDate(
+    '2012-02-28T18:30:00',
+    '2023-05-31T18:30:00'
+  )
+  .filter(
+    ee.Filter.or(
+      ee.Filter.calendarRange(22, 23, 'hour'),
+      ee.Filter.calendarRange(0, 0, 'hour')
+    )
+  );
+
+print(
+  'Filtered ERA5 monthly source count:',
+  era5MonthlySource.size()
+);
+
+
+function calculateMonthlyStatistics(year, month) {
+
+  year = ee.Number(year);
+  month = ee.Number(month);
+
+  var localStart = ee.Date.fromYMD(year, month, 1);
+  var localEnd = localStart.advance(1, 'month');
+
+  var utcStart = localStart.advance(-330, 'minute');
+  var utcEnd = localEnd.advance(-330, 'minute');
+
+  var monthlyCollection = era5MonthlySource.filterDate(
+    utcStart,
+    utcEnd
+  );
+
+  var monthlyImage = monthlyCollection
+    .mean()
+    .subtract(273.15)
+    .rename('temperature_C')
+    .setDefaultProjection(era5Projection);
+
+  var stats = monthlyImage.reduceRegion({
+
+    reducer: ee.Reducer.mean()
+      .combine({
+        reducer2: ee.Reducer.min(),
+        sharedInputs: true
+      })
+      .combine({
+        reducer2: ee.Reducer.max(),
+        sharedInputs: true
+      }),
+
+    geometry: puneGeometry,
+    crs: era5Projection,
+    scale: era5Scale,
+    maxPixels: 1e13,
+    tileScale: 8
+
+  });
+
+  return ee.Feature(null, {
+
+    Year: year,
+    Month_Number: month,
+    Month: monthNames.get(month.format()),
+
+    Mean_Temperature_C:
+      stats.get('temperature_C_mean'),
+
+    Minimum_Spatial_Temperature_C:
+      stats.get('temperature_C_min'),
+
+    Maximum_Spatial_Temperature_C:
+      stats.get('temperature_C_max'),
+
+    Observation_Count: monthlyCollection.size(),
+
+    Expected_Count: localEnd.difference(
+      localStart, 'day'
+    ).multiply(3),
+
+    Season: 'Pre-monsoon',
+    Time_Window_IST: '03:30, 04:30, 05:30',
+    Dataset: 'ERA5-Land HOURLY'
+
+  });
+
+}
+
+
+var monthlyFeatureList = years.map(function(year) {
+
+  return months.map(function(month) {
+
+    return calculateMonthlyStatistics(year, month);
+
+  });
+
+}).flatten();
+
+var monthlyStatistics = ee.FeatureCollection(
+  monthlyFeatureList
+).map(function(feature) {
+
+  feature = ee.Feature(feature);
+
+  return feature.set(
+    'YearMonth',
+    ee.Number(feature.get('Year')).multiply(100)
+      .add(ee.Number(feature.get('Month_Number')))
+  );
+
+}).sort('YearMonth');
+
+print('FIGURE 6: Monthly ERA5 statistics export prepared.');
+
+Export.table.toDrive({
+
+  collection: monthlyStatistics,
+
+  description:
+    'Pune_ERA5_Monthly_Nighttime_Statistics_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_ERA5_Monthly_Nighttime_Statistics_2012_2023',
+
+  fileFormat: 'CSV',
+
+  selectors: [
+    'Year',
+    'Month_Number',
+    'Month',
+    'Mean_Temperature_C',
+    'Minimum_Spatial_Temperature_C',
+    'Maximum_Spatial_Temperature_C',
+    'Observation_Count',
+    'Expected_Count',
+    'Season',
+    'Time_Window_IST',
+    'Dataset'
+  ]
+
+});
+
+print('FIGURE 6: Monthly ERA5 CSV export task created.');
+
+
+// ============================================================================
+// 12. EXPORT ERA5 ANNUAL STATISTICS
+// ============================================================================
+
+Export.table.toDrive({
+
+  collection: annualStatistics,
+
+  description:
+    'Pune_ERA5_Nighttime_Annual_Statistics_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_ERA5_Nighttime_Annual_Statistics_2012_2023',
+
+  fileFormat: 'CSV'
+
+});
+
+
+// ============================================================================
+// 13. EXPORT ERA5 OBSERVATION COUNTS
+// ============================================================================
+
+Export.table.toDrive({
+
+  collection: observationCountTable,
+
+  description:
+    'Pune_ERA5_Nighttime_Observation_Counts_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_ERA5_Nighttime_Observation_Counts_2012_2023',
+
+  fileFormat: 'CSV'
+
+});
+
+
+// ============================================================================
+// 14. EXPORT ERA5 SPATIAL TEMPERATURE TREND
+// ============================================================================
+
+Export.image.toDrive({
+
+  image: temperatureTrend,
+
+  description:
+    'Pune_ERA5_Nighttime_Temperature_Trend_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_ERA5_Nighttime_Temperature_Trend_2012_2023',
+
+  region: puneGeometry,
+
+  crs: era5Projection.crs(),
+
+  scale: era5Scale,
+
+  maxPixels: 1e13,
+
+  fileFormat: 'GeoTIFF'
+
+});
+
+
+// ============================================================================
+// 15. EXPORT ERA5 LONG-TERM MEAN
+// ============================================================================
+
+Export.image.toDrive({
+
+  image: overallMeanTemperature,
+
+  description:
+    'Pune_ERA5_Nighttime_Mean_Temperature_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_ERA5_Nighttime_Mean_Temperature_2012_2023',
+
+  region: puneGeometry,
+
+  crs: era5Projection.crs(),
+
+  scale: era5Scale,
+
+  maxPixels: 1e13,
+
+  fileFormat: 'GeoTIFF'
+
+});
+
+
+// ============================================================================
+// PART B: MODIS TERRA NIGHTTIME LAND SURFACE TEMPERATURE
+// ============================================================================
+
+
+// ============================================================================
+// 16. LOAD MODIS TERRA MOD11A1.061
+// ============================================================================
+
+var modisRaw = ee.ImageCollection('MODIS/061/MOD11A1');
+
+var firstMODISImage = ee.Image(modisRaw.first());
+
+var modisProjection = firstMODISImage
+  .select('LST_Night_1km')
+  .projection();
+
+var modisCRS = modisProjection.crs();
+
+var modisScale = modisProjection.nominalScale();
+
+print('MODIS band names:', firstMODISImage.bandNames());
+print('First MODIS image:', firstMODISImage);
+print('MODIS native projection:', modisProjection);
+print('MODIS CRS:', modisCRS);
+print('MODIS nominal scale (m):', modisScale);
+
+
+// ============================================================================
+// 17. MODIS QUALITY CONTROL AND CELSIUS CONVERSION
+// ============================================================================
+
+// LST_Night_1km scale factor = 0.02 Kelvin.
+// Celsius = (DN × 0.02) - 273.15.
+//
+// QC_Night bit interpretation:
+//
+// Bits 0–1: Mandatory QA
+// 00 = Good quality
+// 01 = Other quality (LST produced, inspect other QA bits)
+// 10 = Reserved
+// 11 = Not produced
+//
+// Bits 2–3: Data quality
+// 00 = Good data quality
+// 01 = Other quality
+// 10 = TBD
+// 11 = TBD
+//
+// Your observed QC_Night values:
+// 17, 65, 81 -> mandatory QA 01, data quality 00
+// 2          -> mandatory QA 10, data quality 00
+//
+// Retain mandatory QA 00 and 01 only when data quality is 00.
+// This is not a strict best-quality-only filter.
+
+function prepareMODIS(image) {
+
+  image = ee.Image(image);
+
+  var qa = image.select('QC_Night');
+
+  // Extract mandatory QA bits 0–1.
+  var mandatoryQA = qa.bitwiseAnd(3);
+
+  // Extract data quality bits 2–3.
+  var dataQuality = qa.rightShift(2).bitwiseAnd(3);
+
+  // Accept mandatory QA 00 and 01.
+  var acceptedMandatoryQA = mandatoryQA.lte(1);
+
+  // Require good data quality.
+  var acceptedDataQuality = dataQuality.eq(0);
+
+  var acceptedPixels = acceptedMandatoryQA
+    .and(acceptedDataQuality);
+
+  var lstCelsius = image
+    .select('LST_Night_1km')
+    .multiply(0.02)
+    .subtract(273.15)
+    .rename('LST_Night_C');
+
+  return lstCelsius
+    .updateMask(acceptedPixels)
+    .copyProperties(image, ['system:time_start']);
+
+}
+
+
+// ============================================================================
+// 18. FILTER MODIS OBSERVATIONS FOR MARCH–MAY
+// ============================================================================
+
+function getMODISSeasonCollection(year) {
+
+  year = ee.Number(year);
+
+  var start = ee.Date.fromYMD(year, 3, 1);
+  var end = ee.Date.fromYMD(year, 6, 1);
+
+  return modisRaw
+    .filterDate(start, end)
+    .map(prepareMODIS);
+
+}
+
+
+// ============================================================================
+// 19. CREATE ANNUAL MODIS NIGHTTIME LST COMPOSITES
+// ============================================================================
+
+function createMODISAnnualComposite(year) {
+
+  year = ee.Number(year);
+
+  var annualCollection = getMODISSeasonCollection(year);
+
+  var annualMean = annualCollection
+    .mean()
+    .rename('LST_Night_C')
+    .setDefaultProjection(modisProjection)
+    .clip(puneGeometry);
+
+  return annualMean.set({
+
+    Year: year,
+
+    Image_Count: annualCollection.size(),
+
+    Season: 'March-May',
+
+    Dataset: 'MODIS Terra MOD11A1.061',
+
+    QA_Filter:
+      'Mandatory QA 00 or 01; data quality bits 2-3 equal 00'
+
+  });
+
+}
+
+var modisAnnualImages = ee.ImageCollection.fromImages(
+  years.map(createMODISAnnualComposite)
+);
+
+print('MODIS annual composites:', modisAnnualImages);
+
+print(
+  'Number of MODIS annual composites:',
+  modisAnnualImages.size()
+);
+
+
+// ============================================================================
+// 20. MODIS QA VERIFICATION — 1 MARCH 2012
+// ============================================================================
+
+// Verify that the corrected QA function retains valid pixels.
+// This section does not alter the annual composites.
+
+var raw2012 = ee.Image(
+  modisRaw.filterDate('2012-03-01', '2012-06-01').first()
+);
+
+var testFiltered = ee.Image(prepareMODIS(raw2012));
+
+var rawLSTCount = raw2012
+  .select('LST_Night_1km')
+  .reduceRegion({
+
+    reducer: ee.Reducer.count(),
+
+    geometry: puneGeometry,
+
+    crs: modisProjection,
+
+    scale: modisScale,
+
+    maxPixels: 1e13,
+
+    tileScale: 8
+
+  });
+
+var filteredLSTCount = testFiltered.reduceRegion({
+
+  reducer: ee.Reducer.count(),
+
+  geometry: puneGeometry,
+
+  crs: modisProjection,
+
+  scale: modisScale,
+
+  maxPixels: 1e13,
+
+  tileScale: 8
+
+});
+
+var filteredLSTMean = testFiltered.reduceRegion({
+
+  reducer: ee.Reducer.mean(),
+
+  geometry: puneGeometry,
+
+  crs: modisProjection,
+
+  scale: modisScale,
+
+  maxPixels: 1e13,
+
+  tileScale: 8
+
+});
+
+print('MODIS 2012 first image:', raw2012.date());
+
+print('MODIS 2012 raw LST pixel count:', rawLSTCount);
+
+print('MODIS 2012 updated QA pixel count:', filteredLSTCount);
+
+print('MODIS 2012 updated mean LST (°C):', filteredLSTMean);
+
+
+// ============================================================================
+// 21. MODIS ANNUAL DISTRICT-LEVEL STATISTICS
+// ============================================================================
+
+// These statistics describe the spatial distribution of each
+// annual mean nighttime LST composite within Pune District.
+//
+// Valid_Pixel_Count is a spatial pixel count in the annual composite.
+// It is not the number of daily satellite observations.
+
+var modisAnnualStatistics = ee.FeatureCollection(
+  years.map(function(year) {
+
+    year = ee.Number(year);
+
+    var image = ee.Image(
+      modisAnnualImages
+        .filter(ee.Filter.eq('Year', year))
+        .first()
+    );
+
+    var stats = image.reduceRegion({
+
+      reducer: ee.Reducer.mean()
+        .combine({
+          reducer2: ee.Reducer.min(),
+          sharedInputs: true
+        })
+        .combine({
+          reducer2: ee.Reducer.max(),
+          sharedInputs: true
+        })
+        .combine({
+          reducer2: ee.Reducer.count(),
+          sharedInputs: true
+        }),
+
+      geometry: puneGeometry,
+
+      crs: modisProjection,
+
+      scale: modisScale,
+
+      maxPixels: 1e13,
+
+      tileScale: 8
+
+    });
+
+    return ee.Feature(null, {
+
+      Year: year,
+
+      Mean_Nighttime_LST_C:
+        stats.get('LST_Night_C_mean'),
+
+      Minimum_Spatial_LST_C:
+        stats.get('LST_Night_C_min'),
+
+      Maximum_Spatial_LST_C:
+        stats.get('LST_Night_C_max'),
+
+      Valid_Pixel_Count:
+        stats.get('LST_Night_C_count'),
+
+      Image_Count:
+        image.get('Image_Count'),
+
+      Season: 'March-May',
+
+      Dataset: 'MODIS Terra MOD11A1.061',
+
+      QA_Filter:
+        'Mandatory QA 00 or 01; data quality bits 2-3 equal 00'
+
+    });
+
+  })
+).sort('Year');
+
+print('MODIS annual statistics:', modisAnnualStatistics);
+
+print(
+  'MODIS annual record count:',
+  modisAnnualStatistics.size()
+);
+
+print(
+  'MODIS first annual record:',
+  modisAnnualStatistics.first().toDictionary()
+);
+
+print(
+  'MODIS annual property names:',
+  modisAnnualStatistics.first().propertyNames()
+);
+
+
+// ============================================================================
+// 22. MODIS LONG-TERM MEAN NIGHTTIME LST
+// ============================================================================
+
+var modisLongTermMean = modisAnnualImages
+  .select('LST_Night_C')
+  .mean()
+  .rename('Long_Term_Mean_Nighttime_LST_C')
+  .setDefaultProjection(modisProjection)
+  .clip(puneGeometry);
+
+Map.addLayer(
+
+  modisLongTermMean,
+
+  {
+    min: 15,
+    max: 30,
+    palette: [
+      '313695',
+      '74ADD1',
+      'FFFFBF',
+      'FDAE61',
+      'D73027'
+    ]
+  },
+
+  'MODIS Mean Nighttime LST 2012–2023'
+
+);
+
+print('MODIS long-term mean image:', modisLongTermMean);
+
+
+// ============================================================================
+// 23. FIGURE 7: ANNUAL MODIS NIGHTTIME LST CHART
+// ============================================================================
+
+// Plot only years with valid mean LST values.
+
+var validMODISStatistics = modisAnnualStatistics
+  .filter(ee.Filter.notNull(['Mean_Nighttime_LST_C']))
+  .map(function(feature) {
+
+    feature = ee.Feature(feature);
+
+    return feature.set(
+      'Year_numeric',
+      ee.Number(feature.get('Year'))
+    );
+
+  });
+
+var validMODISCount = validMODISStatistics.size().getInfo();
+
+print(
+  'MODIS annual records with valid mean LST:',
+  validMODISCount
+);
+
+if (validMODISCount > 0) {
+
+  var modisChart = ui.Chart.feature.byFeature({
+
+    features: validMODISStatistics,
+
+    xProperty: 'Year_numeric',
+
+    yProperties: ['Mean_Nighttime_LST_C']
+
+  })
+  .setChartType('LineChart')
+  .setOptions({
+
+    title:
+      'Annual Mean Nighttime Land Surface Temperature in Pune District (2012–2023)',
+
+    hAxis: {
+      title: 'Year',
+      format: '####',
+      gridlines: {count: 12}
+    },
+
+    vAxis: {
+      title: 'Mean Nighttime Land Surface Temperature (°C)'
+    },
+
+    series: {
+      0: {
+        color: '#7B3294',
+        lineWidth: 3,
+        pointSize: 7
+      }
+    },
+
+    trendlines: {
+      0: {
+        type: 'linear',
+        color: '#D73027',
+        lineWidth: 2,
+        opacity: 0.9,
+        showR2: true,
+        visibleInLegend: true
+      }
+    },
+
+    legend: {position: 'bottom'},
+
+    chartArea: {
+      width: '78%',
+      height: '68%'
+    },
+
+    width: 950,
+
+    height: 550
+
+  });
+
+  print('FIGURE 7: MODIS Annual Nighttime LST Chart', modisChart);
+
+} else {
+
+  print(
+    'FIGURE 7 NOT GENERATED:',
+    'No annual MODIS mean LST values are available. ' +
+    'Check the updated QA pixel count and annual statistics.'
+  );
+
+}
+
+
+// ============================================================================
+// 24. EXPORT MODIS ANNUAL STATISTICS CSV
+// ============================================================================
+
+Export.table.toDrive({
+
+  collection: modisAnnualStatistics,
+
+  description:
+    'Pune_MODIS_Nighttime_LST_Annual_Statistics_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_MODIS_Nighttime_LST_Annual_Statistics_2012_2023',
+
+  fileFormat: 'CSV',
+
+  selectors: [
+
+    'Year',
+
+    'Mean_Nighttime_LST_C',
+
+    'Minimum_Spatial_LST_C',
+
+    'Maximum_Spatial_LST_C',
+
+    'Valid_Pixel_Count',
+
+    'Image_Count',
+
+    'Season',
+
+    'Dataset',
+
+    'QA_Filter'
+
+  ]
+
+});
+
+
+// ============================================================================
+// 25. EXPORT MODIS LONG-TERM MEAN NIGHTTIME LST
+// ============================================================================
+
+Export.image.toDrive({
+
+  image: modisLongTermMean,
+
+  description:
+    'Pune_MODIS_Nighttime_LST_Mean_2012_2023',
+
+  folder: 'Pune_Nighttime_Thermal_Research',
+
+  fileNamePrefix:
+    'Pune_MODIS_Nighttime_LST_Mean_2012_2023',
+
+  region: puneGeometry,
+
+  crs: modisCRS,
+
+  scale: modisScale,
+
+  maxPixels: 1e13,
+
+  fileFormat: 'GeoTIFF'
+
+});
+
+
+// ============================================================================
+// 26. FINAL STATUS
+// ============================================================================
+
+print('================================================');
+
+print('NIGHTTIME THERMAL ANALYSIS SCRIPT COMPLETED');
+
+print('Study Area: Pune District, Maharashtra');
+
+print('Study Period: 2012–2023');
+
+print('Season: March–May');
+
+print('ERA5: Nighttime 2 m Air Temperature');
+
+print('MODIS: Nighttime Land Surface Temperature');
+
+print('ERA5 Annual Observations Expected: 276 per year');
+
+print('MODIS: QA-screened annual composites');
+
+print('Check the Tasks tab to run all exports.');
+
+print('================================================');
+
+
+
+// =====================================================
+// FIGURE 8: SPATIAL TREND OF NIGHTTIME MODIS LST
+// Study period: 2012–2023
+// Season: March–May
+// =====================================================
+
+// =====================================================
+// FIGURE 8: SPATIAL TREND OF NIGHTTIME MODIS LST
+// Pune District | March–May | 2012–2023
+// =====================================================
+
+// 1. Add year band to each annual MODIS composite.
+
+// =====================================================
+// FIGURE 8: SPATIAL TREND OF NIGHTTIME MODIS LST
+// Pune District | March-May | 2012-2023
+// =====================================================
+
+// 1. Convert annual composites to a list.
+// The collection was generated in chronological order.
+var modisAnnualList = modisAnnualImages.toList(12);
+
+// 2. Attach the correct year to each annual image.
+// This avoids depending on system:time_start.
+var modisAnnualWithYear = ee.ImageCollection.fromImages(
+  ee.List.sequence(0, 11).map(function(index) {
+
+    index = ee.Number(index);
+
+    var image = ee.Image(modisAnnualList.get(index));
+
+    var year = index.add(2012);
+
+    var lst = image.select('LST_Night_C');
+
+    var yearBand = ee.Image.constant(year)
+      .rename('year')
+      .toFloat()
+      .updateMask(lst.mask());
+
+    return lst.addBands(yearBand);
+  })
+);
+
+// 3. Calculate pixel-wise linear regression.
+// X = Year; Y = Nighttime LST.
+var modisTrend = modisAnnualWithYear
+  .select(['year', 'LST_Night_C'])
+  .reduce(ee.Reducer.linearFit());
+
+// 4. Extract annual trend slope.
+var modisSlope = modisTrend.select('scale')
+  .rename('MODIS_Night_LST_Trend_C_per_Year')
+  .clip(puneGeometry);
+
+// 5. Calculate fitted change over 11 years.
+var modisChange = modisSlope
+  .multiply(11)
+  .rename('MODIS_Night_LST_Fitted_Change_2012_2023_C')
+  .clip(puneGeometry);
+
+// 6. Visualization parameters.
+var trendVis = {
+  min: -0.15,
+  max: 0.15,
+  palette: [
+    '313695',
+    '74add1',
+    'ffffbf',
+    'f46d43',
+    'a50026'
+  ]
+};
+
+var changeVis = {
+  min: -1.65,
+  max: 1.65,
+  palette: [
+    '313695',
+    '74add1',
+    'ffffbf',
+    'f46d43',
+    'a50026'
+  ]
+};
+
+// 7. Display Figure 8.
+Map.addLayer(
+  modisSlope,
+  trendVis,
+  'Figure 8 - MODIS Nighttime LST Spatial Trend',
+  true
+);
+
+// 8. Display fitted 11-year change.
+Map.addLayer(
+  modisChange,
+  changeVis,
+  'MODIS Nighttime LST Fitted Change 2012-2023',
+  false
+);
+
+// 9. Print results.
+print(
+  'FIGURE 8: MODIS spatial trend image:',
+  modisSlope
+);
+
+print(
+  'FIGURE 8: Mean spatial trend (°C/year):',
+  modisSlope.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: puneGeometry,
+    crs: modisProjection,
+    scale: modisProjection.nominalScale(),
+    maxPixels: 1e13,
+    tileScale: 8
+  })
+);
+
+print(
+  'FIGURE 8: Mean fitted 11-year change (°C):',
+  modisChange.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: puneGeometry,
+    crs: modisProjection,
+    scale: modisProjection.nominalScale(),
+    maxPixels: 1e13,
+    tileScale: 8
+  })
+);
+
+// 10. Export spatial trend.
+Export.image.toDrive({
+  image: modisSlope,
+  description: 'Figure_8_MODIS_Nighttime_LST_Trend_2012_2023',
+  folder: 'Pune_Nighttime_Thermal_Research',
+  fileNamePrefix: 'Figure_8_MODIS_Nighttime_LST_Trend_2012_2023',
+  region: puneGeometry,
+  crs: modisProjection.crs(),
+  scale: modisProjection.nominalScale(),
+  maxPixels: 1e13
+});
+
+// 11. Export fitted change.
+Export.image.toDrive({
+  image: modisChange,
+  description: 'MODIS_Nighttime_LST_Fitted_Change_2012_2023',
+  folder: 'Pune_Nighttime_Thermal_Research',
+  fileNamePrefix: 'MODIS_Nighttime_LST_Fitted_Change_2012_2023',
+  region: puneGeometry,
+  crs: modisProjection.crs(),
+  scale: modisProjection.nominalScale(),
+  maxPixels: 1e13
+});
+
+print('FIGURE 8: MODIS spatial trend analysis completed.');
+
+// ============================================================================
+// END OF SCRIPT
+// ============================================================================
